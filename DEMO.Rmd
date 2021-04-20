@@ -1,0 +1,174 @@
+---
+title: "Chain of Demand Midterm Demo"
+author: "Lisa Kailai Han, Anwen Huang, Lexie Li, Joyce Moon, Dasson Tan"
+date: "3/24/2020"
+output: 
+  html_document:
+    toc:  true
+    toc_float:  true
+    code_folding:  show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+library(rJava)
+library(RWeka)
+library(pander)
+library(wordcloud)
+set.seed(4747)
+```
+
+```{r, include=FALSE}
+uniqlo <- read.csv("uniqlo_extended.csv")[,3:12]
+esprit <- read_excel("esprit_20200106.xlsx")
+```
+
+![Proposed Pipeline](demo_flow_diagram.png)
+
+# Demo
+
+## Feature engineering
+
+We will focus on demonstrating how to construct feature set (1), because constructing feature set (2) is a fairly standard practice:
+
+- Selected 5 random rows from the UNIQLO dataset for demo.
+- Added bi-gram and tri-gram tokenization to break down product name.
+- Added detailed category, season, color and materials to feature set (1).
+
+Our tokenization tries to get close to people's search habit for clothes.
+
+```{r}
+uni_rand_rows <- sample(1:nrow(uniqlo), 5)
+uniqlo[c(1394, 1757, 649, 1320, 659),] %>% pander
+```
+
+```{r}
+uniqlo_process_cat <- function(cat){
+  cat <- cat %>% tolower()
+  if (grepl("&", cat)){
+    return(strsplit(cat, "&"))
+  } else if (grepl("/", cat)){
+    return(strsplit(cat, "/"))
+  } else {
+    return(cat)
+  }
+}
+
+uniqlo_process_mat_ <- function(composition){
+  sub('[[:digit:]]+% ', '', composition) %>% tolower
+}
+
+uniqlo_process_mat <- function(mat){
+  compositions <- stringr::str_extract_all(mat, '[[:digit:]]+% [[:alpha:]]+')
+  lapply(compositions, uniqlo_process_mat_)
+}
+
+uniqlo_process_pname <- function(ui, ngram_min=1, ngram_max=3){
+  uniqlo_pname <- uniqlo$Product.Name[ui]
+  
+  # remove digit code in product name
+  uniqlo_pname <- gsub('[[:digit:]]+', '', uniqlo_pname) %>% tolower()
+  tokens <- NGramTokenizer(uniqlo_pname, 
+                           control=Weka_control(min=ngram_min, max=ngram_max))
+  tokens
+  detailed_cat <- uniqlo_process_cat(uniqlo$Category_2[ui] %>% as.character)[[1]]
+  base <- c(tokens, detailed_cat)
+
+  color <- uniqlo$Color[ui] %>% as.character %>% tolower
+  material <- uniqlo_process_mat(uniqlo$Material[ui] %>% as.character)[[1]]
+  adjectives <- c(color, material)
+  
+  combinations <- expand.grid(Base=base, Adj=adjectives)
+  combinations$Concat <- paste(combinations$Adj, combinations$Base)
+
+  return(combinations) # for demo purposes
+  #return(c(base, adjectives, combinations$Concat))
+}
+
+uniqlo_process_pname(1757) %>% pander
+```
+
+```{r, include=F}
+#my_list <- lapply(1:nrow(uniqlo), uniqlo_process_pname)
+#sapply(my_list, paste, collapse=";") %>% write(file="search_terms_all.txt")
+```
+
+## Online and social data
+
+
+## Leading brand
+
+Now let us treat ESPRIT as our brand of interest, and assume that UNIQLO is the leading brand in the same sector (casual wear targeting all populations). We will compute a **leading brand similarity index** for each ESPRIT item. This index can later be added to feature set (2) as a predictor.
+
+```{r}
+esp_rand_rows <- sample(1:nrow(esprit), 5)
+esprit[esp_rand_rows,2:8] %>% pander
+```
+
+```{r, include=F}
+uniqlo_original <- read_excel("uniqlo_20200106.xlsx")
+uniqlo_process_pname <- function(uniqlo_pname, ngram_min=1, ngram_max=2){
+  # remove digit code in product name
+  uniqlo_pname <- gsub('[[:digit:]]+', '', uniqlo_pname) %>% tolower()
+  tokens <- NGramTokenizer(uniqlo_pname, 
+                           control=Weka_control(min=ngram_min, max=ngram_max))
+  tokens
+}
+uniqlo_pname_tokens_all <- lapply(uniqlo_original$`Product Name`, 
+                                  uniqlo_process_pname) %>% unlist
+
+get_pname_freq_in_lb <- function(pname_tok){
+  sum(uniqlo_pname_tokens_all == pname_tok)
+}
+
+uniqlo_pname_tokens_all_df <- data.frame(token=uniqlo_pname_tokens_all) %>%
+  group_by(token) %>% summarize(total=n())
+```
+
+```{r}
+wordcloud(words = uniqlo_pname_tokens_all_df$token, freq = uniqlo_pname_tokens_all_df$total, min.freq = 7,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+```
+
+
+```{r, include=F}
+esprit_process_pname <- function(esprit_pname, ngram_min=1, ngram_max=3){
+  esprit_pname <- esprit_pname %>% tolower()
+  tokens <- NGramTokenizer(esprit_pname, 
+                           control=Weka_control(min=ngram_min, max=ngram_max))
+  tokens
+}
+
+esprit_pname_against_lb <- function(espirt_pname){
+  tokens <- esprit_process_pname(espirt_pname)
+  sapply(tokens, get_pname_freq_in_lb) %>% sum
+}
+
+esprit$freq_index_against_lb <- sapply(esprit$`Product Name`, esprit_pname_against_lb)
+```
+
+```{r}
+esprit %>% ggplot(aes(x=freq_index_against_lb)) +
+  geom_histogram(bins=25) +
+  theme_bw() +
+  labs(x = "Leading Brand Similarity Index",
+       y = "Count",
+       title = "Leading Brand Similarity Index (ESPRIT with UNIQLO as the leading brand)")
+```
+
+Items with the highest leading brand index: appear to be the most similar to UNIQLO's products.
+
+```{r}
+esprit[order(-esprit$freq_index_against_lb),c(2,6:8)] %>% head(10) %>% pander()
+```
+
+Items with the lowest leading brand index:
+
+```{r}
+esprit[order(esprit$freq_index_against_lb),c(2,6:8)] %>% head(10) %>% pander()
+```
+
+
